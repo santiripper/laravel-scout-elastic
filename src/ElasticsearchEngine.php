@@ -3,15 +3,22 @@
 namespace ScoutEngines\Elasticsearch;
 
 use Laravel\Scout\Builder;
-use Laravel\Scout\Engines\Engine;
-use Elasticsearch\Client as Elastic;
+use Elasticsearch\Client as Elasticsearch;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Collection as BaseCollection;
+use Laravel\Scout\Engines\Engine;
 
 class ElasticsearchEngine extends Engine
 {
     /**
-     * Index where the models will be saved.
+     * The Elasticsearch client instance.
+     *
+     * @var \Elasticsearch\Client
+     */
+    protected $elasticsearch;
+
+    /**
+     * The index name.
      *
      * @var string
      */
@@ -20,12 +27,13 @@ class ElasticsearchEngine extends Engine
     /**
      * Create a new engine instance.
      *
-     * @param  \Elasticsearch\Client  $elastic
+     * @param  \Elasticsearch\Client  $elasticsearch
      * @return void
      */
-    public function __construct(Elastic $elastic, $index)
+    public function __construct(Elasticsearch $elasticsearch, $index)
     {
-        $this->elastic = $elastic;
+        $this->elasticsearch = $elasticsearch;
+
         $this->index = $index;
     }
 
@@ -37,24 +45,30 @@ class ElasticsearchEngine extends Engine
      */
     public function update($models)
     {
-        $params['body'] = [];
+        $body = new BaseCollection();
 
-        $models->each(function($model) use (&$params)
-        {
-            $params['body'][] = [
-                'update' => [
-                    '_id' => $model->getKey(),
+        $models->each(function ($model) use ($body) {
+            $array = $model->toSearchableArray();
+
+            if (empty($array)) {
+                return;
+            }
+
+            $body->push([
+                'index' => [
                     '_index' => $this->index,
                     '_type' => $model->searchableAs(),
-                ]
-            ];
-            $params['body'][] = [
-                'doc' => $model->toSearchableArray(),
-                'doc_as_upsert' => true
-            ];
+                    '_id' => $model->getKey(),
+                ],
+            ]);
+
+            $body->push($array);
         });
 
-        $this->elastic->bulk($params);
+        $this->elasticsearch->bulk([
+            'refresh' => true,
+            'body' => $body->all(),
+        ]);
     }
 
     /**
@@ -65,53 +79,55 @@ class ElasticsearchEngine extends Engine
      */
     public function delete($models)
     {
-        $params['body'] = [];
+        $body = new BaseCollection();
 
-        $models->each(function($model) use (&$params)
-        {
-            $params['body'][] = [
+        $models->each(function ($model) use ($body) {
+            $body->push([
                 'delete' => [
-                    '_id' => $model->getKey(),
                     '_index' => $this->index,
                     '_type' => $model->searchableAs(),
-                ]
-            ];
+                    '_id'  => $model->getKey(),
+                ],
+            ]);
         });
 
-        $this->elastic->bulk($params);
+        $this->elasticsearch->bulk([
+            'refresh' => true,
+            'body' => $body->all(),
+        ]);
     }
 
     /**
      * Perform the given search on the engine.
      *
-     * @param  Builder  $builder
+     * @param  Builder  $query
      * @return mixed
      */
-    public function search(Builder $builder)
+    public function search(Builder $query)
     {
-        return $this->performSearch($builder, array_filter([
-            'numericFilters' => $this->filters($builder),
-            'size' => $builder->limit,
-        ]));
+        return $this->performSearch($query, [
+            'filters' => $this->filters($query),
+            'size' => $query->limit ?: 10000,
+        ]);
     }
 
     /**
      * Perform the given search on the engine.
      *
-     * @param  Builder  $builder
+     * @param  Builder  $query
      * @param  int  $perPage
      * @param  int  $page
      * @return mixed
      */
-    public function paginate(Builder $builder, $perPage, $page)
+    public function paginate(Builder $query, $perPage, $page)
     {
-        $result = $this->performSearch($builder, [
-            'numericFilters' => $this->filters($builder),
-            'from' => (($page * $perPage) - $perPage),
+        $result = $this->performSearch($query, [
+            'filters' => $this->filters($query),
             'size' => $perPage,
+            'from' => (($page * $perPage) - $perPage),
         ]);
 
-       $result['nbPages'] = $result['hits']['total']/$perPage;
+        $result['nbPages'] = (int) ceil($result['hits']['total'] / $perPage);
 
         return $result;
     }
@@ -125,45 +141,129 @@ class ElasticsearchEngine extends Engine
      */
     protected function performSearch(Builder $builder, array $options = [])
     {
-        $params = [
-            'index' => $this->index,
-            'type' => $builder->model->searchableAs(),
-            'body' => [
-                'query' => [
-                    'bool' => [
-                        'must' => [['query_string' => [ 'query' => "*{$builder->query}*"]]]
+        $filters = [];
+        $matches = [];
+
+        if (is_string($builder->query)) {
+            $matches[] = [
+                'match' => [
+                    '_all' => [
+                        'query' => $builder->query,
+                        'fuzziness' => 1
                     ]
                 ]
-            ]
+            ];
+        }
+
+        if (is_array($builder->query) && count($builder->query)) {
+            /**
+             * Geo distance
+             */
+            if ($geo = array_get($builder->query, 'geo_distance')) {
+                $attribute = array_get($geo, 'attribute', 'location');
+                $filters[] = [
+                    'geo_distance' => [
+                        'distance' => array_get($geo, 'distance', '3km'),
+                        "distance_type" => 'plane',
+                         $attribute => [
+                            'lon' => array_get($geo, 'lng'),
+                            'lat' => array_get($geo, 'lat')
+                         ]
+                    ]
+                ];
+            }
+
+            if ($skip = array_get($builder->query, 'skip')) {
+                $query['from'] = $skip;
+            }
+
+            if ($limit = array_get($builder->query, 'limit')) {
+                $query['size'] = $limit;
+            }
+        }
+
+        if (array_key_exists('filters', $options) && $options['filters']) {
+            foreach ($options['filters'] as $field => $value) {
+
+                if (is_numeric($value)) {
+                    $filters[] = [
+                        'term' => [
+                            $field => $value,
+                        ],
+                    ];
+                } elseif (is_string($value)) {
+                    $matches[] = [
+                        'match' => [
+                            $field => [
+                                'query' => $value,
+                                'operator' => 'and'
+                            ]
+                        ]
+                    ];
+                }
+            }
+        }
+
+        $query = [
+            'index' =>  $this->index,
+            'type'  =>  $builder->model->searchableAs(),
+            'body' => [
+                'query' => [
+                    'filtered' => [
+                        'filter' => $filters,
+                        'query' => [
+                            'bool' => [
+                                'must' => $matches
+                            ]
+                        ],
+                    ],
+                ],
+            ],
         ];
 
-        if (isset($options['from'])) {
-            $params['body']['from'] = $options['from'];
+        if ($builder->orders) {
+            $sort = [];
+            foreach ($builder->orders as $order) {
+                $attribute = $order['column'];
+                $sort[] = [
+                    $attribute => [
+                        'order' => $order['direction']
+                    ]
+                ];
+            }
+            $query['body']['sort'] = $sort;
         }
 
-        if (isset($options['size'])) {
-            $params['body']['size'] = $options['size'];
+        if (array_key_exists('size', $options)) {
+            $query['size'] = $options['size'];
         }
 
-        if (isset($options['numericFilters']) && count($options['numericFilters'])) {
-            $params['body']['query']['bool']['must'] = array_merge($params['body']['query']['bool']['must'],
-                $options['numericFilters']);
+        if (array_key_exists('from', $options)) {
+            $query['from'] = $options['from'];
         }
 
-        return $this->elastic->search($params);
+        logger(json_encode($query['body'], JSON_PRETTY_PRINT));
+
+        if ($builder->callback) {
+            return call_user_func(
+                $builder->callback,
+                $this->elasticsearch,
+                $query
+            );
+        }
+
+        return $this->elasticsearch->search($query);
     }
 
     /**
      * Get the filter array for the query.
      *
-     * @param  Builder  $builder
+     * @param  Builder  $query
      * @return array
      */
-    protected function filters(Builder $builder)
+    protected function filters(Builder $query)
     {
-        return collect($builder->wheres)->map(function ($value, $key) {
-            return ['match_phrase' => [$key => $value]];
-        })->values()->all();
+        return $query->wheres;
     }
 
     /**
@@ -175,20 +275,23 @@ class ElasticsearchEngine extends Engine
      */
     public function map($results, $model)
     {
-        if (count($results['hits']['total']) === 0) {
+        if (count($results['hits']) === 0) {
             return Collection::make();
         }
 
         $keys = collect($results['hits']['hits'])
-                        ->pluck('_id')->values()->all();
+            ->pluck('_id')
+            ->values()
+            ->all();
 
         $models = $model->whereIn(
-            $model->getKeyName(), $keys
+            $model->getQualifiedKeyName(), $keys
         )->get()->keyBy($model->getKeyName());
 
-        return collect($results['hits']['hits'])->map(function ($hit) use ($model, $models) {
-            return $models[$hit['_id']];
-        });
+        return Collection::make($results['hits']['hits'])->map(function ($hit) use ($model, $models) {
+            return isset($models[$hit['_source'][$model->getKeyName()]])
+                ? $models[$hit['_source'][$model->getKeyName()]] : null;
+        })->filter()->values();
     }
 
     /**
