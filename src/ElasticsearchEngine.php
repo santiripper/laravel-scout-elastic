@@ -242,8 +242,6 @@ class ElasticsearchEngine extends Engine
             $query['from'] = $options['from'];
         }
 
-        logger(json_encode($query['body'], JSON_PRETTY_PRINT));
-
         if ($builder->callback) {
             return call_user_func(
                 $builder->callback,
