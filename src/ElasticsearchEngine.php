@@ -144,6 +144,12 @@ class ElasticsearchEngine extends Engine
         $filters = [];
         $matches = [];
 
+        if (is_null($builder->query) || empty($builder->query)) {
+            $matches[] = [
+                'match_all' => []
+            ];
+        }
+
         if (is_string($builder->query)) {
             $matches[] = [
                 'match' => [
@@ -241,8 +247,6 @@ class ElasticsearchEngine extends Engine
         if (array_key_exists('from', $options)) {
             $query['from'] = $options['from'];
         }
-
-        logger(json_encode($query['body'], JSON_PRETTY_PRINT));
 
         if ($builder->callback) {
             return call_user_func(
