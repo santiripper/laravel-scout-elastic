@@ -25,6 +25,13 @@ class ElasticsearchEngine extends Engine
     protected $index;
 
     /**
+     * Soft delete
+     *
+     * @var bool
+     */
+    protected $showTrashed = false;
+
+    /**
      * Create a new engine instance.
      *
      * @param  \Elasticsearch\Client  $elasticsearch
@@ -95,6 +102,19 @@ class ElasticsearchEngine extends Engine
             'refresh' => true,
             'body' => $body->all(),
         ]);
+    }
+
+    /**
+     * Return deleted documents
+     *
+     * @param bool $value
+     * @return $this
+     */
+    public function withTrashed($value = true)
+    {
+        $this->showTrashed = $value;
+
+        return $this;
     }
 
     /**
@@ -288,9 +308,16 @@ class ElasticsearchEngine extends Engine
             ->values()
             ->all();
 
-        $models = $model->whereIn(
-            $model->getQualifiedKeyName(), $keys
-        )->get()->keyBy($model->getKeyName());
+        $modelQuery = $model->whereIn(
+            $model->getQualifiedKeyName(),
+            $keys
+        );
+
+        if ($this->showTrashed) {
+            $modelQuery->withTrashed();
+        }
+
+        $models = $modelQuery->get()->keyBy($model->getKeyName());
 
         return Collection::make($results['hits']['hits'])->map(function ($hit) use ($model, $models) {
             return isset($models[$hit['_source'][$model->getKeyName()]])
@@ -309,3 +336,4 @@ class ElasticsearchEngine extends Engine
         return $results['hits']['total'];
     }
 }
+
