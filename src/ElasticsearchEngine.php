@@ -127,6 +127,7 @@ class ElasticsearchEngine extends Engine
     {
         return $this->performSearch($query, [
             'filters' => $this->filters($query),
+            'rawFilters' => $this->rawFilters($query),
             'size' => $query->limit ?: 10000,
         ]);
     }
@@ -143,6 +144,7 @@ class ElasticsearchEngine extends Engine
     {
         $result = $this->performSearch($query, [
             'filters' => $this->filters($query),
+            'rawFilters' => $this->rawFilters($query),
             'size' => $perPage,
             'from' => (($page * $perPage) - $perPage),
         ]);
@@ -161,8 +163,8 @@ class ElasticsearchEngine extends Engine
      */
     protected function performSearch(Builder $builder, array $options = [])
     {
-        $filters = [];
-        $matches = [];
+        $filters    = array_get($options, 'rawFilters', []);
+        $matches    = [];
 
         if (is_null($builder->query) || empty($builder->query)) {
             $matches[] = [
@@ -205,6 +207,12 @@ class ElasticsearchEngine extends Engine
 
             if ($limit = array_get($builder->query, 'limit')) {
                 $query['size'] = $limit;
+            }
+
+            if ($on = array_get($builder->query, 'on')) {
+                $matches[] = [
+                    'match' => $on,
+                ];
             }
         }
 
@@ -288,6 +296,17 @@ class ElasticsearchEngine extends Engine
     protected function filters(Builder $query)
     {
         return $query->wheres;
+    }
+
+    /**
+     * Get the raw filter array for the query.
+     *
+     * @param  Builder  $query
+     * @return array
+     */
+    protected function rawFilters(Builder $query)
+    {
+        return $query->filters;
     }
 
     /**
