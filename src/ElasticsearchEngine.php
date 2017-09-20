@@ -163,17 +163,19 @@ class ElasticsearchEngine extends Engine
      */
     protected function performSearch(Builder $builder, array $options = [])
     {
-        $filters    = array_get($options, 'rawFilters', []);
-        $matches    = [];
+        $raw        = array_get($options, 'rawFilters', []);
+        $must       = [];
+        $should     = [];
+        $filters    = [];
 
         if (is_null($builder->query) || empty($builder->query)) {
-            $matches[] = [
+            $must[] = [
                 'match_all' => []
             ];
         }
 
         if (is_string($builder->query)) {
-            $matches[] = [
+            $must[] = [
                 'match' => [
                     '_all' => [
                         'query' => $builder->query,
@@ -210,7 +212,7 @@ class ElasticsearchEngine extends Engine
             }
 
             if ($on = array_get($builder->query, 'on')) {
-                $matches[] = [
+                $must[] = [
                     'match' => $on,
                 ];
             }
@@ -220,13 +222,13 @@ class ElasticsearchEngine extends Engine
             foreach ($options['filters'] as $field => $value) {
 
                 if (is_numeric($value)) {
-                    $filters[] = [
+                    $must[] = [
                         'term' => [
                             $field => $value,
                         ],
                     ];
                 } elseif (is_string($value)) {
-                    $matches[] = [
+                    $must[] = [
                         'match' => [
                             $field => [
                                 'query' => $value,
@@ -238,6 +240,16 @@ class ElasticsearchEngine extends Engine
             }
         }
 
+        $queryData = [
+            'must' => $must,
+            'should' => $should,
+            'must_not' => []
+        ];
+
+        foreach ($raw as $r) {
+            $queryData = array_merge($queryData, $r);
+        }
+
         $query = [
             'index' =>  $this->index,
             'type'  =>  $builder->model->searchableAs(),
@@ -246,9 +258,7 @@ class ElasticsearchEngine extends Engine
                     'filtered' => [
                         'filter' => $filters,
                         'query' => [
-                            'bool' => [
-                                'must' => $matches
-                            ]
+                            'bool' => $queryData
                         ],
                     ],
                 ],
@@ -355,4 +365,3 @@ class ElasticsearchEngine extends Engine
         return $results['hits']['total'];
     }
 }
-
