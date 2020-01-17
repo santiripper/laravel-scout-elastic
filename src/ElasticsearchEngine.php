@@ -2,27 +2,27 @@
 
 namespace ScoutEngines\Elasticsearch;
 
+use Illuminate\Support\Arr;
 use Laravel\Scout\Builder;
-use Elasticsearch\Client as Elasticsearch;
-use Illuminate\Database\Eloquent\Collection;
-use Illuminate\Support\Collection as BaseCollection;
 use Laravel\Scout\Engines\Engine;
+use Elasticsearch\Client as Elastic;
+use Illuminate\Database\Eloquent\Collection;
 
 class ElasticsearchEngine extends Engine
 {
     /**
-     * The Elasticsearch client instance.
-     *
-     * @var \Elasticsearch\Client
-     */
-    protected $elasticsearch;
-
-    /**
-     * The index name.
+     * Index where the models will be saved.
      *
      * @var string
      */
     protected $index;
+    
+    /**
+     * Elastic where the instance of Elastic|\Elasticsearch\Client is stored.
+     *
+     * @var object
+     */
+    protected $elastic;
 
     /**
      * Soft delete
@@ -34,13 +34,12 @@ class ElasticsearchEngine extends Engine
     /**
      * Create a new engine instance.
      *
-     * @param  \Elasticsearch\Client  $elasticsearch
+     * @param  \Elasticsearch\Client  $elastic
      * @return void
      */
-    public function __construct(Elasticsearch $elasticsearch, $index)
+    public function __construct(Elastic $elastic, $index)
     {
-        $this->elasticsearch = $elasticsearch;
-
+        $this->elastic = $elastic;
         $this->index = $index;
     }
 
@@ -52,30 +51,33 @@ class ElasticsearchEngine extends Engine
      */
     public function update($models)
     {
-        $body = new BaseCollection();
+        $params['refresh'] = true;
+        $params['body'] = [];
 
-        $models->each(function ($model) use ($body) {
-            $array = $model->toSearchableArray();
+        $models->each(function($model) use (&$params)
+        {
+            $doc = $model->toSearchableArray();
 
-            if (empty($array)) {
-                return;
+            if (empty($doc)) {
+                return true;
             }
 
-            $body->push([
-                'index' => [
+            $params['body'][] = [
+                'update' => [
+                    '_id' => $model->getKey(),
                     '_index' => $this->index,
                     '_type' => $model->searchableAs(),
-                    '_id' => $model->getKey(),
-                ],
-            ]);
-
-            $body->push($array);
+                ]
+            ];
+            $params['body'][] = [
+                'doc' => $doc,
+                'doc_as_upsert' => true
+            ];
         });
 
-        $this->elasticsearch->bulk([
-            'refresh' => true,
-            'body' => $body->all(),
-        ]);
+        if (!empty($params['body'])) {
+            $this->elastic->bulk($params);
+        }
     }
 
     /**
@@ -86,22 +88,21 @@ class ElasticsearchEngine extends Engine
      */
     public function delete($models)
     {
-        $body = new BaseCollection();
+        $params['refresh'] = true;
+        $params['body'] = [];
 
-        $models->each(function ($model) use ($body) {
-            $body->push([
+        $models->each(function($model) use (&$params)
+        {
+            $params['body'][] = [
                 'delete' => [
+                    '_id' => $model->getKey(),
                     '_index' => $this->index,
                     '_type' => $model->searchableAs(),
-                    '_id'  => $model->getKey(),
-                ],
-            ]);
+                ]
+            ];
         });
 
-        $this->elasticsearch->bulk([
-            'refresh' => true,
-            'body' => $body->all(),
-        ]);
+        $this->elastic->bulk($params);
     }
 
     /**
@@ -113,43 +114,42 @@ class ElasticsearchEngine extends Engine
     public function withTrashed($value = true)
     {
         $this->showTrashed = $value;
-
         return $this;
     }
 
     /**
      * Perform the given search on the engine.
      *
-     * @param  Builder  $query
+     * @param  Builder  $builder
      * @return mixed
      */
-    public function search(Builder $query)
+    public function search(Builder $builder)
     {
-        return $this->performSearch($query, [
-            'filters' => $this->filters($query),
-            'rawFilters' => $this->rawFilters($query),
-            'size' => $query->limit ?: 10000,
-        ]);
+        return $this->performSearch($builder, array_filter([
+            'filters' => $this->filters($builder),
+            'rawFilters' => $this->rawFilters($builder),
+            'size' => $builder->limit ?: 10000,
+        ]));
     }
 
     /**
      * Perform the given search on the engine.
      *
-     * @param  Builder  $query
+     * @param  Builder  $builder
      * @param  int  $perPage
      * @param  int  $page
      * @return mixed
      */
-    public function paginate(Builder $query, $perPage, $page)
+    public function paginate(Builder $builder, $perPage, $page)
     {
-        $result = $this->performSearch($query, [
-            'filters' => $this->filters($query),
-            'rawFilters' => $this->rawFilters($query),
-            'size' => $perPage,
+        $result = $this->performSearch($builder, [
+            'filters' => $this->filters($builder),
+            'rawFilters' => $this->rawFilters($builder),
             'from' => (($page * $perPage) - $perPage),
+            'size' => $perPage,
         ]);
 
-        $result['nbPages'] = (int) ceil($result['hits']['total'] / $perPage);
+       $result['nbPages'] = (int) ceil($result['hits']['total'] / $perPage);;
 
         return $result;
     }
@@ -163,18 +163,16 @@ class ElasticsearchEngine extends Engine
      */
     protected function performSearch(Builder $builder, array $options = [])
     {
-        $raw        = array_get($options, 'rawFilters', []);
+        $raw        = Arr::get($options, 'rawFilters', []);
         $must       = [];
         $should     = [];
         $filters    = [];
-
+        
         if (is_null($builder->query) || empty($builder->query)) {
             $must[] = [
                 'match_all' => []
             ];
-        }
-
-        if (is_string($builder->query)) {
+        } elseif (is_string($builder->query)) {
             $must[] = [
                 'match' => [
                     '_all' => [
@@ -183,44 +181,41 @@ class ElasticsearchEngine extends Engine
                     ]
                 ]
             ];
-        }
-
-        if (is_array($builder->query) && count($builder->query)) {
+        } elseif (is_array($builder->query)) {
             /**
              * Geo distance
              */
-            if ($geo = array_get($builder->query, 'geo_distance')) {
-                $attribute = array_get($geo, 'attribute', 'location');
+            if ($geo = Arr::get($builder->query, 'geo_distance')) {
+                $attribute = Arr::get($geo, 'attribute', 'location');
                 $filters[] = [
                     'geo_distance' => [
-                        'distance' => array_get($geo, 'distance', '3km'),
+                        'distance' => Arr::get($geo, 'distance', '3km'),
                         "distance_type" => 'plane',
-                         $attribute => [
-                            'lon' => array_get($geo, 'lng'),
-                            'lat' => array_get($geo, 'lat')
-                         ]
+                        $attribute => [
+                            'lon' => Arr::get($geo, 'lng'),
+                            'lat' => Arr::get($geo, 'lat')
+                        ]
                     ]
                 ];
             }
 
-            if ($skip = array_get($builder->query, 'skip')) {
+            if ($skip = Arr::get($builder->query, 'skip')) {
                 $query['from'] = $skip;
             }
 
-            if ($limit = array_get($builder->query, 'limit')) {
+            if ($limit = Arr::get($builder->query, 'limit')) {
                 $query['size'] = $limit;
             }
 
-            if ($on = array_get($builder->query, 'on')) {
+            if ($on = Arr::get($builder->query, 'on')) {
                 $must[] = [
                     'match' => $on,
                 ];
             }
         }
 
-        if (array_key_exists('filters', $options) && $options['filters']) {
+        if (Arr::get($options, 'filters')) {
             foreach ($options['filters'] as $field => $value) {
-
                 if (is_numeric($value)) {
                     $must[] = [
                         'term' => [
@@ -278,55 +273,67 @@ class ElasticsearchEngine extends Engine
             $query['body']['sort'] = $sort;
         }
 
-        if (array_key_exists('size', $options)) {
+        if (Arr::has($options, 'size')) {
             $query['size'] = $options['size'];
         }
 
-        if (array_key_exists('from', $options)) {
+        if (Arr::has($options, 'from')) {
             $query['from'] = $options['from'];
         }
 
         if ($builder->callback) {
             return call_user_func(
                 $builder->callback,
-                $this->elasticsearch,
+                $this->elastic,
                 $query
             );
         }
 
-        return $this->elasticsearch->search($query);
+        return $this->elastic->search($query);
     }
 
     /**
      * Get the filter array for the query.
      *
-     * @param  Builder  $query
+     * @param  Builder  $builder
      * @return array
      */
-    protected function filters(Builder $query)
+    protected function filters(Builder $builder)
     {
-        return $query->wheres;
+        return $builder->wheres;
     }
 
     /**
      * Get the raw filter array for the query.
      *
-     * @param  Builder  $query
+     * @param  Builder  $builder
      * @return array
      */
-    protected function rawFilters(Builder $query)
+    protected function rawFilters(Builder $builder)
     {
-        return $query->filters;
+        return $builder->filters;
+    }
+
+    /**
+     * Pluck and return the primary keys of the given results.
+     *
+     * @param  mixed  $results
+     * @return \Illuminate\Support\Collection
+     */
+    public function mapIds($results)
+    {
+        return collect($results['hits']['hits'])->pluck('_id')->values();
     }
 
     /**
      * Map the given results to instances of the given model.
      *
+     * @param  \Laravel\Scout\Builder  $builder
      * @param  mixed  $results
      * @param  \Illuminate\Database\Eloquent\Model  $model
      * @return Collection
      */
-    public function map($results, $model)
+    public function map(Builder $builder, $results, $model)
     {
         if (count($results['hits']) === 0) {
             return Collection::make();
@@ -353,7 +360,6 @@ class ElasticsearchEngine extends Engine
                 ? $models[$hit['_source'][$model->getKeyName()]] : null;
         })->filter()->values();
     }
-
     /**
      * Get the total count from a raw result returned by the engine.
      *
@@ -363,5 +369,35 @@ class ElasticsearchEngine extends Engine
     public function getTotalCount($results)
     {
         return $results['hits']['total'];
+    }
+
+    /**
+     * Flush all of the model's records from the engine.
+     *
+     * @param  \Illuminate\Database\Eloquent\Model  $model
+     * @return void
+     */
+    public function flush($model)
+    {
+        $model->newQuery()
+            ->orderBy($model->getKeyName())
+            ->unsearchable();
+    }
+
+    /**
+     * Generates the sort if theres any.
+     *
+     * @param  Builder $builder
+     * @return array|null
+     */
+    protected function sort($builder)
+    {
+        if (count($builder->orders) == 0) {
+            return null;
+        }
+
+        return collect($builder->orders)->map(function($order) {
+            return [$order['column'] => $order['direction']];
+        })->toArray();
     }
 }
