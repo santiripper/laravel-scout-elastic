@@ -16,7 +16,7 @@ class ElasticsearchEngine extends Engine
      * @var string
      */
     protected $index;
-    
+
     /**
      * Elastic where the instance of Elastic|\Elasticsearch\Client is stored.
      *
@@ -149,7 +149,7 @@ class ElasticsearchEngine extends Engine
             'size' => $perPage,
         ]);
 
-       $result['nbPages'] = (int) ceil($result['hits']['total'] / $perPage);;
+        $result['nbPages'] = (int) ceil($result['hits']['total'] / $perPage);
 
         return $result;
     }
@@ -167,7 +167,7 @@ class ElasticsearchEngine extends Engine
         $must       = [];
         $should     = [];
         $filters    = [];
-        
+
         if (is_null($builder->query) || empty($builder->query)) {
             $must[] = [
                 'match_all' => []
@@ -231,6 +231,8 @@ class ElasticsearchEngine extends Engine
                             ]
                         ]
                     ];
+                } elseif (is_array($value) && Arr::has($value, 'exists')) {
+                    $must[] = $value;
                 }
             }
         }
