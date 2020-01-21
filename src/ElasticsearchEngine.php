@@ -163,10 +163,11 @@ class ElasticsearchEngine extends Engine
      */
     protected function performSearch(Builder $builder, array $options = [])
     {
-        $raw        = Arr::get($options, 'rawFilters', []);
-        $must       = [];
-        $should     = [];
-        $filters    = [];
+        $raw      = Arr::get($options, 'rawFilters', []);
+        $must     = [];
+        $must_not = [];
+        $should   = [];
+        $filters  = [];
 
         if (is_null($builder->query) || empty($builder->query)) {
             $must[] = [
@@ -233,6 +234,10 @@ class ElasticsearchEngine extends Engine
                     ];
                 } elseif (is_array($value) && Arr::has($value, 'exists')) {
                     $must[] = $value;
+                } elseif (is_array($value) && Arr::has($value, 'missing')) {
+                    $must_not[] = [
+                        'exists' => Arr::get($value, 'missing'),
+                    ];
                 }
             }
         }
@@ -240,7 +245,7 @@ class ElasticsearchEngine extends Engine
         $queryData = [
             'must' => $must,
             'should' => $should,
-            'must_not' => []
+            'must_not' => $must_not,
         ];
 
         foreach ($raw as $r) {
